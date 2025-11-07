@@ -5,8 +5,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
-	httpx "github.com/ishantswami13-crypto/vantro/internal/http"
+	apphttp "github.com/ishantswami13-crypto/vantro/internal/http"
 	"github.com/ishantswami13-crypto/vantro/internal/payouts"
 	"github.com/ishantswami13-crypto/vantro/internal/providers/mock"
 	"github.com/ishantswami13-crypto/vantro/internal/storage"
@@ -14,32 +15,39 @@ import (
 )
 
 func main() {
+	// load .env locally; harmless on Render
 	_ = godotenv.Load()
 
-	port := env("PORT", "8080")
-	dbURL := env("DATABASE_URL", "")
-	apiKey := env("API_KEY", "")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL required")
+	// connect DB (forces using DATABASE_URL, avoids local /tmp/.s.PGSQL.5432)
+	pool, err := storage.NewPoolFromEnv(context.Background())
+	if err != nil {
+		log.Fatalf("db connect failed: %v", err)
 	}
+	defer pool.Close()
+
+	prov := mock.New() // sandbox provider
+	svc := payouts.NewService(pool, prov)
+	h := &payouts.Handler{
+		Svc:           svc,
+		DB:            pool,
+		WebhookSecret: env("WEBHOOK_SECRET", ""),
+	}
+
+	apiKey := env("API_KEY", "")
 	if apiKey == "" {
 		log.Println("WARN: API_KEY empty; set for auth")
 	}
+	mux := apphttp.NewRouter(h, apiKey)
 
-	ctx := context.Background()
-	store, err := storage.New(ctx, dbURL)
-	if err != nil {
-		log.Fatal(err)
+	addr := ":" + env("PORT", "10000") // Render injects PORT
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
-	defer store.Close(ctx)
 
-	prov := mock.New() // sandbox provider
-	svc := payouts.NewService(store, prov)
-	h := &payouts.Handler{Svc: svc, DB: store.Conn, WebhookSecret: env("WEBHOOK_SECRET", "")}
-
-	router := httpx.Router(h, apiKey)
-	log.Printf("VANTRO payouts listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, router))
+	log.Printf("VANTRO up on %s", addr)
+	log.Fatal(srv.ListenAndServe())
 }
 
 func env(k, d string) string {

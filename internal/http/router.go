@@ -7,7 +7,7 @@ import (
 	"github.com/ishantswami13-crypto/vantro/internal/payouts"
 )
 
-func Router(h *payouts.Handler, apiKey string) http.Handler {
+func NewRouter(h *payouts.Handler, apiKey string) http.Handler {
 	r := chi.NewRouter()
 
 	// Health

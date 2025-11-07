@@ -9,12 +9,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/ishantswami13-crypto/vantro/internal/types"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Handler struct {
 	Svc           *Service
-	DB            *pgx.Conn
+	DB            *pgxpool.Pool
 	WebhookSecret string
 }
 

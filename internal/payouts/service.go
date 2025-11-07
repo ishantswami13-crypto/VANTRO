@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/ishantswami13-crypto/vantro/internal/storage"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Provider interface {
@@ -17,11 +17,11 @@ type Provider interface {
 }
 
 type Service struct {
-	DB       *storage.Store
+	DB       *pgxpool.Pool
 	Provider Provider
 }
 
-func NewService(db *storage.Store, p Provider) *Service {
+func NewService(db *pgxpool.Pool, p Provider) *Service {
 	return &Service{DB: db, Provider: p}
 }
 
@@ -39,18 +39,28 @@ type CreateInput struct {
 }
 
 func (s *Service) Create(ctx context.Context, req CreateInput) (string, error) {
-	if req.Currency == "" { req.Currency = "INR" }
-	if req.Currency != "INR" { return "", errors.New("only INR supported in sandbox") }
-	if req.Method != "upi" && req.Method != "bank" { return "", errors.New("invalid method") }
+	if req.Currency == "" {
+		req.Currency = "INR"
+	}
+	if req.Currency != "INR" {
+		return "", errors.New("only INR supported in sandbox")
+	}
+	if req.Method != "upi" && req.Method != "bank" {
+		return "", errors.New("invalid method")
+	}
 
 	dest := map[string]string{}
 	switch req.Method {
 	case "upi":
-		if req.VPA == "" { return "", errors.New("upi.vpa required") }
+		if req.VPA == "" {
+			return "", errors.New("upi.vpa required")
+		}
 		dest["vpa"] = req.VPA
 		dest["name"] = req.Name
 	case "bank":
-		if req.Account == "" || req.IFSC == "" { return "", errors.New("bank.account & bank.ifsc required") }
+		if req.Account == "" || req.IFSC == "" {
+			return "", errors.New("bank.account & bank.ifsc required")
+		}
 		dest["account"] = req.Account
 		dest["ifsc"] = req.IFSC
 		dest["name"] = req.Name
@@ -58,26 +68,34 @@ func (s *Service) Create(ctx context.Context, req CreateInput) (string, error) {
 
 	amountCents := rupeesToCents(req.Amount)
 	providerRef, initialStatus, err := s.Provider.CreatePayout(ctx, amountCents, req.Method, dest)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 
 	id := "po_" + uuid.NewString()
 
-	tx, err := s.DB.Conn.Begin(ctx)
-	if err != nil { return "", err }
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
 	defer tx.Rollback(ctx)
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO payouts (id, reference_id, amount_cents, currency, method, dest_vpa, dest_name, dest_account, dest_ifsc, status, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), now())
 	`, id, req.Reference, amountCents, req.Currency, req.Method, req.VPA, req.Name, req.Account, req.IFSC, initialStatus)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 
 	evt := map[string]any{"payout_id": id, "status": initialStatus}
 	b, _ := json.Marshal(evt)
 	_, _ = tx.Exec(ctx, `INSERT INTO payout_events (id, payout_id, event, payload) VALUES ($1,$2,$3,$4)`,
 		"evt_"+uuid.NewString(), id, "payout.processing", b)
 
-	if err = tx.Commit(ctx); err != nil { return "", err }
+	if err = tx.Commit(ctx); err != nil {
+		return "", err
+	}
 
 	// simple background resolver (in prod: queue/worker)
 	go s.resolveAsync(id, providerRef)
@@ -95,15 +113,17 @@ func (s *Service) resolveAsync(id, providerRef string) {
 	var res pgx.Rows
 	switch final {
 	case "success":
-		res, err = s.DB.Conn.Query(ctx, `UPDATE payouts SET status='success', utr=$1, updated_at=now() WHERE id=$2 RETURNING id`, utr, id)
+		res, err = s.DB.Query(ctx, `UPDATE payouts SET status='success', utr=$1, updated_at=now() WHERE id=$2 RETURNING id`, utr, id)
 	default:
-		res, err = s.DB.Conn.Query(ctx, `UPDATE payouts SET status='failed', updated_at=now(), error=$1 WHERE id=$2 RETURNING id`, "mock_failure", id)
+		res, err = s.DB.Query(ctx, `UPDATE payouts SET status='failed', updated_at=now(), error=$1 WHERE id=$2 RETURNING id`, "mock_failure", id)
 	}
-	if err == nil { res.Close() }
+	if err == nil {
+		res.Close()
+	}
 
 	evt := map[string]any{"payout_id": id, "status": final, "utr": utr}
 	b, _ := json.Marshal(evt)
-	_, _ = s.DB.Conn.Exec(ctx, `INSERT INTO payout_events (id, payout_id, event, payload) VALUES ($1,$2,$3,$4)`,
+	_, _ = s.DB.Exec(ctx, `INSERT INTO payout_events (id, payout_id, event, payload) VALUES ($1,$2,$3,$4)`,
 		"evt_"+uuid.NewString(), id, "payout."+final, b)
 
 	// TODO: signed webhooks in next patch
