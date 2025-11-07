@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"os"
 
+	httpx "github.com/ishantswami13-crypto/vantro/internal/http"
+	"github.com/ishantswami13-crypto/vantro/internal/payouts"
+	"github.com/ishantswami13-crypto/vantro/internal/providers/mock"
+	"github.com/ishantswami13-crypto/vantro/internal/storage"
 	"github.com/joho/godotenv"
-	"vantro/internal/httpx"
-	"vantro/internal/payouts"
-	"vantro/internal/providers/mock"
-	"vantro/internal/storage"
 )
 
 func main() {

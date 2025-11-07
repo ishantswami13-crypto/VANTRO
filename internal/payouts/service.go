@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"vantro/internal/storage"
+	"github.com/ishantswami13-crypto/vantro/internal/storage"
 )
 
 type Provider interface {

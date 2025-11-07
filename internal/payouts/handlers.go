@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/ishantswami13-crypto/vantro/internal/types"
 	"github.com/jackc/pgx/v5"
-	"vantro/internal/types"
 )
 
 type Handler struct {

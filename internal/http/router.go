@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"vantro/internal/payouts"
+	"github.com/ishantswami13-crypto/vantro/internal/payouts"
 )
 
 func Router(h *payouts.Handler, apiKey string) http.Handler {
