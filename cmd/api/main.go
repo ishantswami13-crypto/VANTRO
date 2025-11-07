@@ -9,6 +9,7 @@ import (
 
 	apphttp "github.com/ishantswami13-crypto/vantro/internal/http"
 	"github.com/ishantswami13-crypto/vantro/internal/payouts"
+	products "github.com/ishantswami13-crypto/vantro/internal/products"
 	"github.com/ishantswami13-crypto/vantro/internal/providers/mock"
 	"github.com/ishantswami13-crypto/vantro/internal/storage"
 	"github.com/joho/godotenv"
@@ -32,12 +33,14 @@ func main() {
 		DB:            pool,
 		WebhookSecret: env("WEBHOOK_SECRET", ""),
 	}
+	prodSvc := products.NewService(pool)
+	prodH := products.NewHandler(prodSvc)
 
 	apiKey := env("API_KEY", "")
 	if apiKey == "" {
 		log.Println("WARN: API_KEY empty; set for auth")
 	}
-	mux := apphttp.NewRouter(h, apiKey)
+	mux := apphttp.NewRouter(h, prodH, apiKey)
 
 	addr := ":" + env("PORT", "10000") // Render injects PORT
 	srv := &http.Server{

@@ -5,9 +5,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/ishantswami13-crypto/vantro/internal/payouts"
+	products "github.com/ishantswami13-crypto/vantro/internal/products"
 )
 
-func NewRouter(h *payouts.Handler, apiKey string) http.Handler {
+func NewRouter(payoutH *payouts.Handler, productH *products.Handler, apiKey string) http.Handler {
 	r := chi.NewRouter()
 
 	// Public routes
@@ -19,14 +20,16 @@ func NewRouter(h *payouts.Handler, apiKey string) http.Handler {
 	r.Route("/api", func(api chi.Router) {
 		api.Use(auth)
 
-		api.Get("/health", h.Health)
-		api.Get("/version", h.Version)
-		api.Get("/ready", h.Ready)
+		api.Get("/health", payoutH.Health)
+		api.Get("/version", payoutH.Version)
+		api.Get("/ready", payoutH.Ready)
 
-		api.Post("/payouts", h.Create)
-		api.Get("/payouts/{id}", h.Get)
-		api.Get("/payouts/ledger", h.Ledger)
-		api.Post("/payouts/{id}/webhook/replay", h.WebhookReplay)
+		api.Post("/payouts", payoutH.Create)
+		api.Get("/payouts/{id}", payoutH.Get)
+		api.Get("/payouts/ledger", payoutH.Ledger)
+		api.Post("/payouts/{id}/webhook/replay", payoutH.WebhookReplay)
+
+		api.Mount("/products", productH.Router())
 	})
 
 	return r
