@@ -1,7 +1,7 @@
 package config
 
 import (
-	"log"
+	"errors"
 	"os"
 )
 
@@ -11,25 +11,18 @@ type Config struct {
 	APIKey      string
 }
 
-func Load() Config {
+func Load() (*Config, error) {
 	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	dbURL := os.Getenv("DATABASE_URL")
+	apiKey := os.Getenv("API_KEY")
+
+	if port == "" || dbURL == "" || apiKey == "" {
+		return nil, errors.New("missing PORT, DATABASE_URL or API_KEY in env")
 	}
 
-	db := os.Getenv("DATABASE_URL")
-	if db == "" {
-		log.Fatal("DATABASE_URL is required")
-	}
-
-	key := os.Getenv("API_KEY")
-	if key == "" {
-		log.Fatal("API_KEY is required")
-	}
-
-	return Config{
+	return &Config{
 		Port:        port,
-		DatabaseURL: db,
-		APIKey:      key,
-	}
+		DatabaseURL: dbURL,
+		APIKey:      apiKey,
+	}, nil
 }

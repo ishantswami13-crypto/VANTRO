@@ -1,3 +1,4 @@
+﻿-- users (reference via supabase user_id or your own uuid)
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY,
   email TEXT UNIQUE,
@@ -8,8 +9,8 @@ CREATE TABLE IF NOT EXISTS expenses (
   id UUID PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
-  category TEXT NOT NULL,
-  mood TEXT,
+  category TEXT NOT NULL,            -- food, travel, bills, shopping, misc
+  mood TEXT,                         -- optional: calm, stressed...
   note TEXT,
   spent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -38,9 +39,9 @@ CREATE TABLE IF NOT EXISTS coach_plans (
   id UUID PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   week_start DATE NOT NULL,
-  rules JSONB NOT NULL,
-  daily_nudge TEXT,
-  health_score INTEGER NOT NULL,
+  rules JSONB NOT NULL,              -- ["No food delivery on weekdays", ...]
+  daily_nudge TEXT,                  -- “Breathe. Check pots before spending.”
+  health_score INTEGER NOT NULL,     -- 0..100
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(user_id, week_start)
 );

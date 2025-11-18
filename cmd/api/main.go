@@ -1,49 +1,35 @@
 package main
 
 import (
-	"context"
 	"log"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
 
-	"github.com/ishantswami13-crypto/vantro/internal/config"
-	"github.com/ishantswami13-crypto/vantro/internal/db"
-	"github.com/ishantswami13-crypto/vantro/internal/handlers"
-	"github.com/ishantswami13-crypto/vantro/internal/middleware"
-	"github.com/ishantswami13-crypto/vantro/internal/repo"
-	"github.com/ishantswami13-crypto/vantro/internal/router"
-	"github.com/ishantswami13-crypto/vantro/internal/services"
+	"fintech-backend/internal/config"
+	"fintech-backend/internal/db"
+	"fintech-backend/internal/router"
 )
 
 func main() {
-	_ = godotenv.Load()
-
-	cfg := config.Load()
-	pool := db.MustPool(context.Background(), cfg.DatabaseURL)
-	defer pool.Close()
-
-	expRepo := repo.NewExpensesRepo(pool)
-	potRepo := repo.NewPotsRepo(pool)
-	coachRepo := repo.NewCoachRepo(pool)
-
-	expSvc := services.NewExpensesService(expRepo)
-	potSvc := services.NewPotsService(potRepo)
-	coachSvc := services.NewCoachService(coachRepo)
-
-	deps := &handlers.Deps{
-		Expenses: expSvc,
-		Pots:     potSvc,
-		Coach:    coachSvc,
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, reading from environment")
 	}
 
-	app := fiber.New(fiber.Config{DisableStartupMessage: true})
-	app.Use(middleware.APIKeyGuard(cfg.APIKey))
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config error: %v", err)
+	}
 
-	router.New(app, pool, deps)
+	pool, err := db.NewPool(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("db error: %v", err)
+	}
+	defer pool.Close()
 
-	log.Printf("VANTRO Fiber API listening on :%s", cfg.Port)
+	app := router.New(cfg, pool)
+
+	log.Printf("Server starting on :%s ...", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {
-		log.Fatal(err)
+		log.Fatalf("server error: %v", err)
 	}
 }

@@ -1,21 +1,19 @@
 package middleware
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"fintech-backend/internal/config"
 
-func APIKeyGuard(expected string) fiber.Handler {
+	"github.com/gofiber/fiber/v2"
+)
+
+func APIKeyAuth(cfg *config.Config) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if c.Path() == "/" || c.Path() == "/health" {
-			return c.Next()
+		apiKey := c.Get("X-API-Key")
+		if apiKey == "" || apiKey != cfg.APIKey {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "invalid or missing API key",
+			})
 		}
-		if len(c.Path()) < 5 || c.Path()[:5] != "/api/" {
-			return c.Next()
-		}
-
-		key := c.Get("API_KEY")
-		if key == "" || key != expected {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-		}
-
 		return c.Next()
 	}
 }
