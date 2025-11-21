@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,7 +44,8 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*User, e
 
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, name, email, api_key
-		FROM users WHERE email = $1
+		FROM users
+		WHERE email = $1
 	`, email)
 
 	var u User
@@ -59,7 +61,8 @@ func (r *Repository) GetUserByAPIKey(ctx context.Context, apiKey string) (*User,
 
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, name, email, api_key
-		FROM users WHERE api_key = $1
+		FROM users
+		WHERE api_key = $1
 	`, apiKey)
 
 	var u User
@@ -76,7 +79,7 @@ func (r *Repository) CreateShop(ctx context.Context, ownerID uuid.UUID, name, ad
 	var s Shop
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO shops (owner_id, name, address, gst_number)
-		VALUES ($1, $2, $3, $4)
+		VALUES ($1,$2,$3,$4)
 		RETURNING id, owner_id, name, address, gst_number, created_at
 	`, ownerID, name, address, gst).Scan(
 		&s.ID, &s.OwnerID, &s.Name, &s.Address, &s.GSTNumber, &s.CreatedAt,
@@ -119,7 +122,8 @@ func (r *Repository) GetShopByID(ctx context.Context, id uuid.UUID) (*Shop, erro
 
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, owner_id, name, address, gst_number, created_at
-		FROM shops WHERE id = $1
+		FROM shops
+		WHERE id = $1
 	`, id)
 
 	var s Shop
@@ -150,7 +154,8 @@ func (r *Repository) CreateProduct(ctx context.Context, p Product) (*Product, er
 		INSERT INTO products (shop_id, name, sku, stock, cost_price, selling_price, low_stock_threshold)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		RETURNING id
-	`, p.ShopID, p.Name, p.SKU, p.Stock, p.CostPrice, p.SellingPrice, p.LowStockThreshold).Scan(&p.ID)
+	`, p.ShopID, p.Name, p.SKU, p.Stock, p.CostPrice, p.SellingPrice, p.LowStockThreshold).
+		Scan(&p.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +168,8 @@ func (r *Repository) ListProductsByShop(ctx context.Context, shopID uuid.UUID) (
 
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, shop_id, name, sku, stock, cost_price, selling_price, low_stock_threshold
-		FROM products WHERE shop_id = $1
+		FROM products
+		WHERE shop_id = $1
 		ORDER BY name
 	`, shopID)
 	if err != nil {
@@ -180,6 +186,21 @@ func (r *Repository) ListProductsByShop(ctx context.Context, shopID uuid.UUID) (
 		result = append(result, p)
 	}
 	return result, nil
+}
+
+func getProductForUpdate(ctx context.Context, tx pgx.Tx, productID uuid.UUID) (*Product, error) {
+	row := tx.QueryRow(ctx, `
+		SELECT id, shop_id, name, sku, stock, cost_price, selling_price, low_stock_threshold
+		FROM products
+		WHERE id = $1
+		FOR UPDATE
+	`, productID)
+
+	var p Product
+	if err := row.Scan(&p.ID, &p.ShopID, &p.Name, &p.SKU, &p.Stock, &p.CostPrice, &p.SellingPrice, &p.LowStockThreshold); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // ========== INVOICES ==========
@@ -204,7 +225,7 @@ type InvoiceItem struct {
 }
 
 func (r *Repository) CreateInvoiceWithItems(ctx context.Context, inv Invoice, items []InvoiceItem) (*Invoice, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	tx, err := r.pool.Begin(ctx)
@@ -212,6 +233,31 @@ func (r *Repository) CreateInvoiceWithItems(ctx context.Context, inv Invoice, it
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+
+	for i := range items {
+		item := &items[i]
+
+		p, err := getProductForUpdate(ctx, tx, item.ProductID)
+		if err != nil {
+			return nil, err
+		}
+		if item.Quantity <= 0 {
+			return nil, errors.New("quantity must be positive")
+		}
+		if p.Stock < item.Quantity {
+			return nil, errors.New("not enough stock for product: " + p.Name)
+		}
+
+		newStock := p.Stock - item.Quantity
+		_, err = tx.Exec(ctx, `
+			UPDATE products
+			SET stock = $1
+			WHERE id = $2
+		`, newStock, p.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO invoices (shop_id, customer_name, customer_phone, total_amount, tax_amount, status)
@@ -230,7 +276,8 @@ func (r *Repository) CreateInvoiceWithItems(ctx context.Context, inv Invoice, it
 			INSERT INTO invoice_items (invoice_id, product_id, quantity, unit_price)
 			VALUES ($1,$2,$3,$4)
 			RETURNING id
-		`, item.InvoiceID, item.ProductID, item.Quantity, item.UnitPrice).Scan(&item.ID)
+		`, item.InvoiceID, item.ProductID, item.Quantity, item.UnitPrice).
+			Scan(&item.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -287,7 +334,8 @@ func (r *Repository) CreateExpense(ctx context.Context, e Expense) (*Expense, er
 		INSERT INTO expenses (shop_id, category, amount, note)
 		VALUES ($1,$2,$3,$4)
 		RETURNING id, spent_at
-	`, e.ShopID, e.Category, e.Amount, e.Note).Scan(&e.ID, &e.SpentAt)
+	`, e.ShopID, e.Category, e.Amount, e.Note).
+		Scan(&e.ID, &e.SpentAt)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +387,8 @@ func (r *Repository) CreatePot(ctx context.Context, p Pot) (*Pot, error) {
 		INSERT INTO pots (shop_id, name, target_amount)
 		VALUES ($1,$2,$3)
 		RETURNING id, current_amount, created_at
-	`, p.ShopID, p.Name, p.TargetAmount).Scan(&p.ID, &p.CurrentAmount, &p.CreatedAt)
+	`, p.ShopID, p.Name, p.TargetAmount).
+		Scan(&p.ID, &p.CurrentAmount, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +409,8 @@ func (r *Repository) DepositToPot(ctx context.Context, potID uuid.UUID, amount f
 		SET current_amount = current_amount + $1
 		WHERE id = $2
 		RETURNING id, shop_id, name, target_amount, current_amount, created_at
-	`, amount, potID).Scan(&p.ID, &p.ShopID, &p.Name, &p.TargetAmount, &p.CurrentAmount, &p.CreatedAt)
+	`, amount, potID).
+		Scan(&p.ID, &p.ShopID, &p.Name, &p.TargetAmount, &p.CurrentAmount, &p.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +452,8 @@ func (r *Repository) SumRevenueLastDays(ctx context.Context, shopID uuid.UUID, d
 	row := r.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(total_amount),0)
 		FROM invoices
-		WHERE shop_id = $1 AND created_at >= now() - ($2 || ' days')::interval
+		WHERE shop_id = $1
+		  AND created_at >= now() - ($2 || ' days')::interval
 	`, shopID, days)
 
 	var total float64
@@ -419,7 +470,8 @@ func (r *Repository) SumExpensesLastDays(ctx context.Context, shopID uuid.UUID, 
 	row := r.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(amount),0)
 		FROM expenses
-		WHERE shop_id = $1 AND spent_at >= now() - ($2 || ' days')::interval
+		WHERE shop_id = $1
+		  AND spent_at >= now() - ($2 || ' days')::interval
 	`, shopID, days)
 
 	var total float64

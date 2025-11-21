@@ -17,6 +17,8 @@ import (
 func New(cfg *config.Config, pool *pgxpool.Pool) *fiber.App {
 	app := fiber.New()
 
+	app.Use(middleware.CORS())
+
 	// Simple demo UI at /
 	app.Get("/", func(c *fiber.Ctx) error {
 		html := `<!DOCTYPE html>
