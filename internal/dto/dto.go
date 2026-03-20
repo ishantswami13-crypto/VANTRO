@@ -3,10 +3,9 @@ package dto
 // ====== SHOPS ======
 
 type CreateShopRequest struct {
-	Name       string `json:"name"`
-	Address    string `json:"address"`
-	GSTNumber  string `json:"gst_number"`
-	OwnerEmail string `json:"owner_email"`
+	Name      string `json:"name"`
+	Address   string `json:"address"`
+	GSTNumber string `json:"gst_number"`
 }
 
 // ====== PRODUCTS ======
@@ -30,11 +29,20 @@ type InvoiceItemRequest struct {
 }
 
 type CreateInvoiceRequest struct {
-	ShopID        string               `json:"shop_id"`
-	CustomerName  string               `json:"customer_name"`
-	CustomerPhone string               `json:"customer_phone"`
-	TaxAmount     float64              `json:"tax_amount"`
-	Items         []InvoiceItemRequest `json:"items"`
+	ShopID         string               `json:"shop_id"`
+	CustomerName   string               `json:"customer_name"`
+	CustomerPhone  string               `json:"customer_phone"`
+	TaxAmount      float64              `json:"tax_amount"`
+	DiscountAmount float64              `json:"discount_amount"`
+	DueDate        string               `json:"due_date"`
+	PaymentMethod  string               `json:"payment_method"`
+	Items          []InvoiceItemRequest `json:"items"`
+}
+
+type UpdateInvoiceStatusRequest struct {
+	Status        string  `json:"status"`
+	PaymentMethod string  `json:"payment_method"`
+	PaidAmount    float64 `json:"paid_amount"`
 }
 
 // ====== EXPENSES ======

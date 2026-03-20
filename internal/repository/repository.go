@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,10 +24,11 @@ func New(pool *pgxpool.Pool) *Repository {
 // ========== USERS / SHOPS ==========
 
 type User struct {
-	ID     uuid.UUID
-	Name   string
-	Email  string
-	APIKey string
+	ID           uuid.UUID
+	Name         string
+	Email        string
+	APIKey       string
+	PasswordHash *string
 }
 
 type Shop struct {
@@ -38,18 +40,30 @@ type Shop struct {
 	CreatedAt time.Time
 }
 
+// ========== SUBSCRIPTIONS ==========
+
+type Subscription struct {
+	ID          int64
+	ClientID    string
+	Status      string
+	ExpiresAt   *time.Time
+	ReferenceID *string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, name, email, api_key
+		SELECT id, name, email, api_key, password_hash
 		FROM users
 		WHERE email = $1
 	`, email)
 
 	var u User
-	if err := row.Scan(&u.ID, &u.Name, &u.Email, &u.APIKey); err != nil {
+	if err := row.Scan(&u.ID, &u.Name, &u.Email, &u.APIKey, &u.PasswordHash); err != nil {
 		return nil, err
 	}
 	return &u, nil
@@ -60,13 +74,31 @@ func (r *Repository) GetUserByAPIKey(ctx context.Context, apiKey string) (*User,
 	defer cancel()
 
 	row := r.pool.QueryRow(ctx, `
-		SELECT id, name, email, api_key
+		SELECT id, name, email, api_key, password_hash
 		FROM users
 		WHERE api_key = $1
 	`, apiKey)
 
 	var u User
-	if err := row.Scan(&u.ID, &u.Name, &u.Email, &u.APIKey); err != nil {
+	if err := row.Scan(&u.ID, &u.Name, &u.Email, &u.APIKey, &u.PasswordHash); err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (r *Repository) CreateUser(ctx context.Context, name, email, passwordHash string) (*User, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	apiKey := uuid.NewString()
+
+	var u User
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO users (name, email, api_key, password_hash)
+		VALUES ($1,$2,$3,$4)
+		RETURNING id, name, email, api_key, password_hash
+	`, name, email, apiKey, passwordHash).Scan(&u.ID, &u.Name, &u.Email, &u.APIKey, &u.PasswordHash)
+	if err != nil {
 		return nil, err
 	}
 	return &u, nil
@@ -131,6 +163,16 @@ func (r *Repository) GetShopByID(ctx context.Context, id uuid.UUID) (*Shop, erro
 		return nil, err
 	}
 	return &s, nil
+}
+
+func (r *Repository) UserOwnsShop(ctx context.Context, userID uuid.UUID, shopID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM shops WHERE id = $1 AND owner_id = $2
+		)
+	`, shopID, userID).Scan(&exists)
+	return exists, err
 }
 
 // ========== PRODUCTS ==========
@@ -206,14 +248,19 @@ func getProductForUpdate(ctx context.Context, tx pgx.Tx, productID uuid.UUID) (*
 // ========== INVOICES ==========
 
 type Invoice struct {
-	ID            uuid.UUID
-	ShopID        uuid.UUID
-	CustomerName  string
-	CustomerPhone string
-	TotalAmount   float64
-	TaxAmount     float64
-	Status        string
-	CreatedAt     time.Time
+	ID             uuid.UUID
+	ShopID         uuid.UUID
+	CustomerName   string
+	CustomerPhone  string
+	Subtotal       float64
+	TaxAmount      float64
+	DiscountAmount float64
+	TotalAmount    float64
+	InvoiceNumber  string
+	Status         string
+	PaymentMethod  *string
+	DueDate        *time.Time
+	CreatedAt      time.Time
 }
 
 type InvoiceItem struct {
@@ -247,6 +294,9 @@ func (r *Repository) CreateInvoiceWithItems(ctx context.Context, inv Invoice, it
 		if p.Stock < item.Quantity {
 			return nil, errors.New("not enough stock for product: " + p.Name)
 		}
+		if p.ShopID != inv.ShopID {
+			return nil, errors.New("product does not belong to shop: " + p.Name)
+		}
 
 		newStock := p.Stock - item.Quantity
 		_, err = tx.Exec(ctx, `
@@ -260,10 +310,10 @@ func (r *Repository) CreateInvoiceWithItems(ctx context.Context, inv Invoice, it
 	}
 
 	err = tx.QueryRow(ctx, `
-		INSERT INTO invoices (shop_id, customer_name, customer_phone, total_amount, tax_amount, status)
-		VALUES ($1,$2,$3,$4,$5,$6)
+		INSERT INTO invoices (shop_id, customer_name, customer_phone, subtotal, tax_amount, discount_amount, total_amount, payment_method, invoice_number, payment_status, due_date)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		RETURNING id, created_at
-	`, inv.ShopID, inv.CustomerName, inv.CustomerPhone, inv.TotalAmount, inv.TaxAmount, inv.Status).
+	`, inv.ShopID, inv.CustomerName, inv.CustomerPhone, inv.Subtotal, inv.TaxAmount, inv.DiscountAmount, inv.TotalAmount, inv.PaymentMethod, inv.InvoiceNumber, inv.Status, inv.DueDate).
 		Scan(&inv.ID, &inv.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -294,7 +344,9 @@ func (r *Repository) ListInvoicesByShop(ctx context.Context, shopID uuid.UUID) (
 	defer cancel()
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, shop_id, customer_name, customer_phone, total_amount, tax_amount, status, created_at
+		SELECT id, shop_id, customer_name, customer_phone, subtotal, tax_amount, discount_amount, total_amount,
+		       COALESCE(invoice_number, '') AS invoice_number,
+		       payment_status, payment_method, due_date, created_at
 		FROM invoices
 		WHERE shop_id = $1
 		ORDER BY created_at DESC
@@ -307,12 +359,154 @@ func (r *Repository) ListInvoicesByShop(ctx context.Context, shopID uuid.UUID) (
 	var result []Invoice
 	for rows.Next() {
 		var iv Invoice
-		if err := rows.Scan(&iv.ID, &iv.ShopID, &iv.CustomerName, &iv.CustomerPhone, &iv.TotalAmount, &iv.TaxAmount, &iv.Status, &iv.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&iv.ID,
+			&iv.ShopID,
+			&iv.CustomerName,
+			&iv.CustomerPhone,
+			&iv.Subtotal,
+			&iv.TaxAmount,
+			&iv.DiscountAmount,
+			&iv.TotalAmount,
+			&iv.InvoiceNumber,
+			&iv.Status,
+			&iv.PaymentMethod,
+			&iv.DueDate,
+			&iv.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		result = append(result, iv)
 	}
 	return result, nil
+}
+
+func (r *Repository) GenerateInvoiceNumber(ctx context.Context, shopID uuid.UUID) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var last int
+	err := r.pool.QueryRow(ctx, `
+        INSERT INTO invoice_counters (shop_id, last_number)
+        VALUES ($1, 1)
+        ON CONFLICT (shop_id)
+        DO UPDATE SET last_number = invoice_counters.last_number + 1
+        RETURNING last_number
+    `, shopID).Scan(&last)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("INV-%05d", last), nil
+}
+
+func (r *Repository) GetInvoiceWithItems(ctx context.Context, invoiceID uuid.UUID) (*Invoice, []InvoiceItem, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var inv Invoice
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, shop_id, customer_name, customer_phone, subtotal, tax_amount, discount_amount, total_amount,
+		       COALESCE(invoice_number, '') AS invoice_number,
+		       payment_status, payment_method, due_date, created_at
+		FROM invoices
+		WHERE id = $1
+	`, invoiceID).Scan(
+		&inv.ID,
+		&inv.ShopID,
+		&inv.CustomerName,
+		&inv.CustomerPhone,
+		&inv.Subtotal,
+		&inv.TaxAmount,
+		&inv.DiscountAmount,
+		&inv.TotalAmount,
+		&inv.InvoiceNumber,
+		&inv.Status,
+		&inv.PaymentMethod,
+		&inv.DueDate,
+		&inv.CreatedAt,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, invoice_id, product_id, quantity, unit_price
+		FROM invoice_items
+		WHERE invoice_id = $1
+	`, invoiceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var items []InvoiceItem
+	for rows.Next() {
+		var it InvoiceItem
+		if err := rows.Scan(&it.ID, &it.InvoiceID, &it.ProductID, &it.Quantity, &it.UnitPrice); err != nil {
+			return nil, nil, err
+		}
+		items = append(items, it)
+	}
+
+	return &inv, items, nil
+}
+
+func (r *Repository) UpdateInvoiceStatus(ctx context.Context, invoiceID uuid.UUID, status, paymentMethod string) (*Invoice, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var inv Invoice
+	err := r.pool.QueryRow(ctx, `
+		UPDATE invoices
+		SET payment_status = $1,
+		    payment_method = COALESCE(NULLIF($2, ''), payment_method)
+		WHERE id = $3
+		RETURNING id, shop_id, customer_name, customer_phone, subtotal, tax_amount, discount_amount, total_amount,
+		          COALESCE(invoice_number, '') AS invoice_number,
+		          payment_status, payment_method, due_date, created_at
+	`, status, paymentMethod, invoiceID).Scan(
+		&inv.ID,
+		&inv.ShopID,
+		&inv.CustomerName,
+		&inv.CustomerPhone,
+		&inv.Subtotal,
+		&inv.TaxAmount,
+		&inv.DiscountAmount,
+		&inv.TotalAmount,
+		&inv.InvoiceNumber,
+		&inv.Status,
+		&inv.PaymentMethod,
+		&inv.DueDate,
+		&inv.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &inv, nil
+}
+
+func (r *Repository) GetInvoiceFullData(ctx context.Context, invoiceID uuid.UUID) (*Invoice, []InvoiceItem, *Shop, map[string]string, error) {
+	inv, items, err := r.GetInvoiceWithItems(ctx, invoiceID)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	shop, err := r.GetShopByID(ctx, inv.ShopID)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	products := make(map[string]string)
+	for _, it := range items {
+		var name string
+		if err := r.pool.QueryRow(ctx, `SELECT name FROM products WHERE id = $1`, it.ProductID).Scan(&name); err == nil {
+			products[it.ProductID.String()] = name
+		}
+	}
+
+	return inv, items, shop, products, nil
 }
 
 // ========== EXPENSES ==========
@@ -479,4 +673,55 @@ func (r *Repository) SumExpensesLastDays(ctx context.Context, shopID uuid.UUID, 
 		return 0, err
 	}
 	return total, nil
+}
+
+// ========== BILLING / SUBSCRIPTIONS ==========
+
+func (r *Repository) GetSubscriptionByClientID(ctx context.Context, clientID string) (*Subscription, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	row := r.pool.QueryRow(ctx, `
+		SELECT id, client_id, status, expires_at, reference_id, created_at, updated_at
+		FROM subscriptions
+		WHERE client_id = $1
+	`, clientID)
+
+	var sub Subscription
+	if err := row.Scan(&sub.ID, &sub.ClientID, &sub.Status, &sub.ExpiresAt, &sub.ReferenceID, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &sub, nil
+}
+
+func (r *Repository) UpsertPendingSubscription(ctx context.Context, clientID, referenceID string) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO subscriptions (client_id, status, expires_at, reference_id)
+		VALUES ($1, 'inactive', NULL, $2)
+		ON CONFLICT (client_id) DO UPDATE
+		SET status = 'inactive',
+			expires_at = NULL,
+			reference_id = EXCLUDED.reference_id,
+			updated_at = now()
+	`, clientID, referenceID)
+	return err
+}
+
+func (r *Repository) ActivateSubscription(ctx context.Context, clientID, referenceID string, expiresAt time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO subscriptions (client_id, status, expires_at, reference_id)
+		VALUES ($1, 'active', $2, $3)
+		ON CONFLICT (client_id) DO UPDATE
+		SET status = 'active',
+			expires_at = $2,
+			reference_id = $3,
+			updated_at = now()
+	`, clientID, expiresAt, referenceID)
+	return err
 }

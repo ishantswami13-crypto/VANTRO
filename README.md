@@ -1,48 +1,37 @@
-# VANTRO — Payouts API (Sandbox v1)
+# VANTRO.Pvt
 
-Developer-first payouts for UPI & bank transfers. Simple API, instant sandbox.
+Optional alternate stack for VANTRO.
 
-## Prereqs
-- Go 1.22+
-- Postgres 14+
-- `psql`
+This folder contains:
 
-## Setup
+- A Go API with runtime entrypoint `cmd/api/main.go`
+- A Flutter client with entrypoint `lib/main.dart`
 
-```bash
-cp .env.example .env
-export $(cat .env | xargs)
+It is not required for the main web deployment, which uses `../vantro-ui` and `../vantro-backend`.
 
-make migrate
-make run
-# -> listening on :8080
+## API Environment
 
-Test (sandbox)
-API=sk_test_123456
+Use `.env.example` as the template.
 
-# Create payout (UPI)
-curl -s -X POST http://localhost:8080/v1/payouts \
-  -H "Authorization: Bearer $API" -H "Content-Type: application/json" \
-  -d '{
-    "amount": 1250.5, "currency":"INR", "method":"upi",
-    "upi": {"vpa":"rahul@upi","name":"Rahul"},
-    "reference_id":"ORDER-92117"
-  }' | jq .
+- `PORT`
+- `ENV`
+- `DATABASE_URL`
+- `API_KEY`
+- `JWT_SECRET`
+- `PROVIDER`
+- `RAZORPAY_KEY_ID`
+- `RAZORPAY_KEY_SECRET`
+- `RAZORPAY_WEBHOOK_SECRET`
 
-# Get status (replace ID from create response)
-curl -s -H "Authorization: Bearer $API" http://localhost:8080/v1/payouts/po_<id> | jq .
+## Commands
 
-# Ledger
-curl -s -H "Authorization: Bearer $API" "http://localhost:8080/v1/payouts/ledger?limit=20" | jq .
+- `go run ./cmd/api`
+- `go test ./...`
+- `go build ./...`
+- `flutter pub get`
+- `flutter analyze`
 
-# Replay last webhook payload (simulated)
-curl -s -X POST -H "Authorization: Bearer $API" http://localhost:8080/v1/payouts/po_<id>/webhook/replay | jq .
+## Keep This Stack Only If
 
-Notes
-
-Sandbox provider returns processing then asynchronously sets success (~92%) or failed.
-
-Webhooks are simulated via /webhook/replay.
-
-In production, implement a real provider (Razorpay Payouts, bank) behind the Provider interface.
-```
+- You still support the Flutter/mobile client
+- You still need this alternate backend implementation

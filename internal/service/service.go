@@ -1,39 +1,152 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
 
+	"fintech-backend/internal/config"
 	"fintech-backend/internal/dto"
+	"fintech-backend/internal/pdf"
 	"fintech-backend/internal/repository"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Service struct {
+	cfg  *config.Config
 	repo *repository.Repository
 }
 
-func New(repo *repository.Repository) *Service {
-	return &Service{repo: repo}
+func New(cfg *config.Config, repo *repository.Repository) *Service {
+	return &Service{cfg: cfg, repo: repo}
+}
+
+// ===== Auth service =====
+
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+
+func checkPassword(hash, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
+type jwtCustomClaims struct {
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
+	jwt.RegisteredClaims
+}
+
+func (s *Service) generateJWT(userID, email string) (string, error) {
+	claims := jwtCustomClaims{
+		UserID: userID,
+		Email:  email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(s.cfg.JWTSecret))
+}
+
+func (s *Service) Signup(ctx context.Context, req dto.SignupRequest) (*dto.AuthResponse, error) {
+	if strings.TrimSpace(req.Email) == "" || strings.TrimSpace(req.Password) == "" {
+		return nil, errors.New("email and password are required")
+	}
+
+	if existing, _ := s.repo.GetUserByEmail(ctx, req.Email); existing != nil {
+		return nil, errors.New("user already exists")
+	}
+
+	hash, err := hashPassword(req.Password)
+	if err != nil {
+		return nil, err
+	}
+
+	user, err := s.repo.CreateUser(ctx, req.Name, req.Email, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := s.generateJWT(user.ID.String(), user.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	return &dto.AuthResponse{
+		Token: token,
+		User: dto.AuthUserResponse{
+			ID:    user.ID.String(),
+			Name:  user.Name,
+			Email: user.Email,
+		},
+	}, nil
+}
+
+func (s *Service) Login(ctx context.Context, req dto.LoginRequest) (*dto.AuthResponse, error) {
+	if strings.TrimSpace(req.Email) == "" || strings.TrimSpace(req.Password) == "" {
+		return nil, errors.New("email and password are required")
+	}
+
+	user, err := s.repo.GetUserByEmail(ctx, req.Email)
+	if err != nil || user.PasswordHash == nil {
+		return nil, errors.New("invalid credentials")
+	}
+
+	if err := checkPassword(*user.PasswordHash, req.Password); err != nil {
+		return nil, errors.New("invalid credentials")
+	}
+
+	token, err := s.generateJWT(user.ID.String(), user.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	return &dto.AuthResponse{
+		Token: token,
+		User: dto.AuthUserResponse{
+			ID:    user.ID.String(),
+			Name:  user.Name,
+			Email: user.Email,
+		},
+	}, nil
 }
 
 // ========== SHOPS ==========
 
-func (s *Service) CreateShop(ctx context.Context, req dto.CreateShopRequest) (*repository.Shop, error) {
-	user, err := s.repo.GetUserByEmail(ctx, req.OwnerEmail)
-	if err != nil {
-		return nil, fmt.Errorf("owner not found: %w", err)
-	}
-	return s.repo.CreateShop(ctx, user.ID, req.Name, req.Address, req.GSTNumber)
+func (s *Service) CreateShop(ctx context.Context, ownerID uuid.UUID, req dto.CreateShopRequest) (*repository.Shop, error) {
+	return s.repo.CreateShop(ctx, ownerID, req.Name, req.Address, req.GSTNumber)
 }
 
-func (s *Service) ListShops(ctx context.Context, apiKey string) ([]repository.Shop, error) {
-	user, err := s.repo.GetUserByAPIKey(ctx, apiKey)
+func (s *Service) ListShopsByUser(ctx context.Context, ownerID uuid.UUID) ([]repository.Shop, error) {
+	return s.repo.ListShopsByUser(ctx, ownerID)
+}
+
+func (s *Service) EnsureOwnership(ctx context.Context, userID, shopID uuid.UUID) error {
+	owns, err := s.repo.UserOwnsShop(ctx, userID, shopID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return s.repo.ListShopsByUser(ctx, user.ID)
+	if !owns {
+		return errors.New("you do not have permission to access this shop")
+	}
+	return nil
 }
 
 // ========== PRODUCTS ==========
@@ -73,38 +186,91 @@ func (s *Service) ListProducts(ctx context.Context, shopIDStr string) ([]reposit
 // ========== INVOICES ==========
 
 func (s *Service) CreateInvoice(ctx context.Context, req dto.CreateInvoiceRequest) (*repository.Invoice, error) {
-	shopID, err := uuid.Parse(req.ShopID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid shop_id")
-	}
 	if len(req.Items) == 0 {
 		return nil, fmt.Errorf("invoice must have at least one item")
 	}
 
-	var total float64
+	shopID, err := uuid.Parse(req.ShopID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid shop_id")
+	}
+
+	if _, err := s.repo.GetShopByID(ctx, shopID); err != nil {
+		return nil, fmt.Errorf("shop not found")
+	}
+
+	var subtotal float64
 	items := make([]repository.InvoiceItem, 0, len(req.Items))
 	for _, it := range req.Items {
-		pID, err := uuid.Parse(it.ProductID)
+		if it.Quantity <= 0 {
+			return nil, fmt.Errorf("quantity must be positive")
+		}
+		if it.UnitPrice <= 0 {
+			return nil, fmt.Errorf("unit_price must be positive")
+		}
+
+		pid, err := uuid.Parse(it.ProductID)
 		if err != nil {
 			return nil, fmt.Errorf("invalid product_id: %s", it.ProductID)
 		}
-		lineTotal := it.UnitPrice * float64(it.Quantity)
-		total += lineTotal
+
+		lineTotal := float64(it.Quantity) * it.UnitPrice
+		subtotal += lineTotal
+
 		items = append(items, repository.InvoiceItem{
-			ProductID: pID,
+			ProductID: pid,
 			Quantity:  it.Quantity,
 			UnitPrice: it.UnitPrice,
 		})
 	}
 
-	inv := repository.Invoice{
-		ShopID:        shopID,
-		CustomerName:  req.CustomerName,
-		CustomerPhone: req.CustomerPhone,
-		TotalAmount:   total + req.TaxAmount,
-		TaxAmount:     req.TaxAmount,
-		Status:        "PAID",
+	if req.TaxAmount < 0 || req.DiscountAmount < 0 {
+		return nil, fmt.Errorf("tax and discount cannot be negative")
 	}
+
+	total := subtotal + req.TaxAmount - req.DiscountAmount
+	if total < 0 {
+		total = 0
+	}
+
+	invoiceNumber, err := s.repo.GenerateInvoiceNumber(ctx, shopID)
+	if err != nil {
+		return nil, fmt.Errorf("cannot generate invoice number: %w", err)
+	}
+
+	var dueTime *time.Time
+	if strings.TrimSpace(req.DueDate) != "" {
+		t, err := time.Parse("2006-01-02", strings.TrimSpace(req.DueDate))
+		if err != nil {
+			return nil, fmt.Errorf("invalid due_date, expected YYYY-MM-DD")
+		}
+		dueTime = &t
+	}
+
+	status := "PAID"
+	if dueTime != nil && total > 0 && time.Now().Before(*dueTime) {
+		status = "DUE"
+	}
+
+	var paymentMethod *string
+	if pm := strings.TrimSpace(req.PaymentMethod); pm != "" {
+		paymentMethod = &pm
+	}
+
+	inv := repository.Invoice{
+		ShopID:         shopID,
+		CustomerName:   req.CustomerName,
+		CustomerPhone:  req.CustomerPhone,
+		Subtotal:       subtotal,
+		TaxAmount:      req.TaxAmount,
+		DiscountAmount: req.DiscountAmount,
+		TotalAmount:    total,
+		InvoiceNumber:  invoiceNumber,
+		Status:         status,
+		PaymentMethod:  paymentMethod,
+		DueDate:        dueTime,
+	}
+
 	return s.repo.CreateInvoiceWithItems(ctx, inv, items)
 }
 
@@ -114,6 +280,64 @@ func (s *Service) ListInvoices(ctx context.Context, shopIDStr string) ([]reposit
 		return nil, fmt.Errorf("invalid shop_id")
 	}
 	return s.repo.ListInvoicesByShop(ctx, shopID)
+}
+
+type InvoiceDetails struct {
+	Invoice repository.Invoice       `json:"invoice"`
+	Items   []repository.InvoiceItem `json:"items"`
+}
+
+func (s *Service) GetInvoiceDetails(ctx context.Context, invoiceIDStr string) (*InvoiceDetails, error) {
+	invoiceID, err := uuid.Parse(invoiceIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid invoice_id")
+	}
+
+	inv, items, err := s.repo.GetInvoiceWithItems(ctx, invoiceID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &InvoiceDetails{
+		Invoice: *inv,
+		Items:   items,
+	}, nil
+}
+
+func (s *Service) UpdateInvoiceStatus(ctx context.Context, invoiceIDStr string, req dto.UpdateInvoiceStatusRequest) (*repository.Invoice, error) {
+	invoiceID, err := uuid.Parse(invoiceIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid invoice_id")
+	}
+
+	status := strings.ToUpper(strings.TrimSpace(req.Status))
+	switch status {
+	case "PAID", "DUE", "PARTIALLY_PAID":
+	default:
+		return nil, fmt.Errorf("invalid status")
+	}
+
+	paymentMethod := strings.TrimSpace(req.PaymentMethod)
+
+	return s.repo.UpdateInvoiceStatus(ctx, invoiceID, status, paymentMethod)
+}
+
+func (s *Service) GetInvoicePDF(ctx context.Context, userID uuid.UUID, invoiceID string) ([]byte, error) {
+	id, err := uuid.Parse(invoiceID)
+	if err != nil {
+		return nil, errors.New("invalid invoice_id")
+	}
+
+	inv, items, shop, products, err := s.repo.GetInvoiceFullData(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.EnsureOwnership(ctx, userID, inv.ShopID); err != nil {
+		return nil, err
+	}
+
+	return pdf.GenerateInvoicePDF(shop, inv, items, products)
 }
 
 // ========== EXPENSES ==========
@@ -263,4 +487,127 @@ func (s *Service) GetCoachInsights(ctx context.Context, shopIDStr string) ([]Coa
 	}
 
 	return insights, nil
+}
+
+// ========== BILLING / SUBSCRIPTIONS ==========
+
+type BillingStatus struct {
+	Active    bool       `json:"active"`
+	ExpiresAt *time.Time `json:"expires_at"`
+}
+
+func (s *Service) GetBillingStatus(ctx context.Context, clientID string) (*BillingStatus, error) {
+	sub, err := s.repo.GetSubscriptionByClientID(ctx, clientID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return &BillingStatus{Active: false, ExpiresAt: nil}, nil
+		}
+		return nil, err
+	}
+
+	active := sub.Status == "active" && sub.ExpiresAt != nil && sub.ExpiresAt.After(time.Now())
+	return &BillingStatus{Active: active, ExpiresAt: sub.ExpiresAt}, nil
+}
+
+func (s *Service) CreatePaymentLink(ctx context.Context, clientID string) (string, string, error) {
+	if strings.TrimSpace(clientID) == "" {
+		return "", "", fmt.Errorf("client_id is required")
+	}
+
+	referenceID := clientID
+	if len(referenceID) > 40 {
+		referenceID = referenceID[:40]
+	}
+
+	if err := s.repo.UpsertPendingSubscription(ctx, clientID, referenceID); err != nil {
+		return "", "", err
+	}
+
+	reqBody := map[string]interface{}{
+		"amount":       19900, // paise
+		"currency":     "INR",
+		"description":  "Vantro Premium (Monthly)",
+		"reference_id": referenceID,
+		"notes": map[string]string{
+			"client_id": clientID,
+		},
+	}
+
+	buf, _ := json.Marshal(reqBody)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.razorpay.com/v1/payment_links", bytes.NewReader(buf))
+	if err != nil {
+		return "", "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.SetBasicAuth(s.cfg.RazorpayKeyID, s.cfg.RazorpayKeySecret)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	var respBody struct {
+		ShortURL    string `json:"short_url"`
+		ReferenceID string `json:"reference_id"`
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var raw map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&raw)
+		return "", "", fmt.Errorf("razorpay error: %s", resp.Status)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		return "", "", err
+	}
+
+	if respBody.ShortURL == "" {
+		return "", "", fmt.Errorf("missing short_url from razorpay")
+	}
+
+	return respBody.ShortURL, respBody.ReferenceID, nil
+}
+
+func (s *Service) HandleBillingWebhook(ctx context.Context, body []byte, signature string) error {
+	if signature == "" {
+		return fmt.Errorf("missing signature")
+	}
+
+	mac := hmac.New(sha256.New, []byte(s.cfg.RazorpayWebhookSecret))
+	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(signature)) {
+		log.Printf("razorpay webhook: signature mismatch expected=%s got=%s", expected, signature)
+		return fmt.Errorf("invalid signature")
+	}
+
+	var payload struct {
+		Event   string `json:"event"`
+		Payload struct {
+			PaymentLink struct {
+				Entity struct {
+					ReferenceID string `json:"reference_id"`
+				} `json:"entity"`
+			} `json:"payment_link"`
+		} `json:"payload"`
+	}
+
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return err
+	}
+
+	if payload.Event != "payment_link.paid" {
+		return nil
+	}
+
+	clientID := payload.Payload.PaymentLink.Entity.ReferenceID
+	if clientID == "" {
+		return fmt.Errorf("missing reference_id in webhook")
+	}
+
+	expires := time.Now().Add(30 * 24 * time.Hour)
+	return s.repo.ActivateSubscription(ctx, clientID, clientID, expires)
 }

@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 
 ThemeData vantroTheme() {
   final base = ThemeData(
@@ -15,16 +15,22 @@ ThemeData vantroTheme() {
       foregroundColor: Colors.black,
       centerTitle: true,
       titleTextStyle: TextStyle(
-        fontSize: 18, fontWeight: FontWeight.w600, color: Colors.black, letterSpacing: -0.2),
+          fontSize: 18,
+          fontWeight: FontWeight.w600,
+          color: Colors.black,
+          letterSpacing: -0.2),
     ),
     textTheme: base.textTheme.copyWith(
       headlineMedium: const TextStyle(
-        fontWeight: FontWeight.w700, color: Colors.black, letterSpacing: -0.3),
+          fontWeight: FontWeight.w700,
+          color: Colors.black,
+          letterSpacing: -0.3),
       titleMedium: const TextStyle(fontWeight: FontWeight.w600),
       bodyMedium: const TextStyle(color: Colors.black87, height: 1.4),
-      labelLarge: const TextStyle(fontWeight: FontWeight.w600, letterSpacing: 0.1),
+      labelLarge:
+          const TextStyle(fontWeight: FontWeight.w600, letterSpacing: 0.1),
     ),
-    cardTheme: CardTheme(
+    cardTheme: CardThemeData(
       color: Colors.white,
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
@@ -55,8 +61,10 @@ class MoneyCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
-        boxShadow: const [BoxShadow(
-          color: Color(0x14000000), blurRadius: 18, offset: Offset(0, 10))],
+        boxShadow: const [
+          BoxShadow(
+              color: Color(0x14000000), blurRadius: 18, offset: Offset(0, 10))
+        ],
         border: Border.all(color: const Color(0x0F000000)),
       ),
       child: child,
@@ -69,7 +77,8 @@ class PillButton extends StatelessWidget {
   final String text;
   final VoidCallback? onPressed;
   final bool tonal;
-  const PillButton({super.key, required this.text, this.onPressed, this.tonal=false});
+  const PillButton(
+      {super.key, required this.text, this.onPressed, this.tonal = false});
 
   @override
   Widget build(BuildContext context) {

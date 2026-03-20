@@ -26,7 +26,7 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
     setState(()=>_saving=true);
     final dio = ref.read(apiProvider);
     try {
-      await dio.post('/api/expenses', data: {
+      await dio.post('/v1/mobile/expenses', data: {
         'amount_cents': amt * 100,
         'category': _category,
         'mood': _mood,

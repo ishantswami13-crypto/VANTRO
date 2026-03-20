@@ -5,7 +5,7 @@ tidy:
 	go mod tidy
 
 migrate:
-	psql "$$DATABASE_URL" -f migrations/001_init.sql
+	psql "$$DATABASE_URL" -f internal/db/migrations/001_init.sql
 
 build:
 	go build -o bin/vantro ./cmd/api
